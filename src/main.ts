@@ -1,20 +1,29 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
-let app: any;
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
 
-async function getApp() {
-  if (!app) {
-    app = await NestFactory.create(AppModule);
-    await app.init();
-  }
-  return app;
+  // CORS 설정
+  app.enableCors({
+    origin: [
+      'http://localhost:3030',
+      'http://localhost:5173',
+      'https://dsign.zigdding.com',
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  });
+
+  await app.init();
+  return app.getHttpAdapter().getInstance();
 }
 
-// CommonJS 방식으로 export
-module.exports = async (req: any, res: any) => {
-  const nestApp = await getApp();
-  return nestApp.getHttpAdapter().getInstance()(req, res);
+// 서버리스 함수로 export
+export default async (req: any, res: any) => {
+  const server = await bootstrap();
+  return server(req, res);
 };
 
 // 로컬 개발용
