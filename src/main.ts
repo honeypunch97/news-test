@@ -1,14 +1,25 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  await app.init();
-  return app.getHttpAdapter().getInstance();
+let app: any;
+
+async function getApp() {
+  if (!app) {
+    app = await NestFactory.create(AppModule);
+    await app.init();
+  }
+  return app;
 }
 
-// 서버리스 함수로 export
-export default async (req: any, res: any) => {
-  const server = await bootstrap();
-  return server(req, res);
+// CommonJS 방식으로 export
+module.exports = async (req: any, res: any) => {
+  const nestApp = await getApp();
+  return nestApp.getHttpAdapter().getInstance()(req, res);
 };
+
+// 로컬 개발용
+if (require.main === module) {
+  NestFactory.create(AppModule).then((app) => {
+    app.listen(process.env.PORT ?? 3000);
+  });
+}
