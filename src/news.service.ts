@@ -22,7 +22,7 @@ export class NewsService implements OnModuleInit {
     // await this.fetchNaverNews();
   }
 
-  // 네이버 뉴스 API 호출 (크론 제거)
+  // 네이버 뉴스 API 호출 (병렬 처리로 최적화)
   async fetchNaverNews() {
     this.logger.log('🕐 네이버 뉴스 API 호출 시작');
     const category = ['한국', '속보', '특보', '사회', 'IT'];
@@ -35,13 +35,14 @@ export class NewsService implements OnModuleInit {
       return [];
     }
 
-    const newsData: any[] = [];
-
     try {
-      // 네이버 뉴스 API 호출
-      for (const item of category) {
-        this.logger.log(`📡 "${item}" 카테고리 뉴스 수집 중...`);
-        const response: any = await firstValueFrom(
+      // 병렬로 모든 카테고리 API 호출
+      this.logger.log(
+        `📡 ${category.length}개 카테고리 뉴스 병렬 수집 시작...`,
+      );
+
+      const promises = category.map((item) =>
+        firstValueFrom(
           this.httpService.get(
             'https://openapi.naver.com/v1/search/news.json',
             {
@@ -55,17 +56,23 @@ export class NewsService implements OnModuleInit {
                 'X-Naver-Client-Id': clientId,
                 'X-Naver-Client-Secret': clientSecret,
               },
+              timeout: 5000, // 5초 타임아웃
             },
           ),
-        );
-        newsData.push(...response.data.items);
-      }
+        ),
+      );
+
+      const responses = await Promise.all(promises);
+      const newsData = responses.flatMap((response) => response.data.items);
 
       this.newsData = newsData;
       this.logger.log(`📊 네이버 뉴스 ${this.newsData.length}건 수집 완료`);
 
-      // MongoDB에 뉴스 데이터 저장
-      await this.saveNewsToMongoDB(newsData);
+      // MongoDB에 뉴스 데이터 저장 (비동기로 처리)
+      this.saveNewsToMongoDB(newsData).catch((error) =>
+        this.logger.error('❌ 백그라운드 MongoDB 저장 실패:', error.message),
+      );
+
       return newsData;
     } catch (error) {
       this.logger.error('❌ 네이버 뉴스 API 호출 실패:', error.message);
@@ -103,11 +110,16 @@ export class NewsService implements OnModuleInit {
     }
   }
 
-  // MongoDB에서 뉴스 가져오기
+  // MongoDB에서 뉴스 가져오기 (빠른 응답을 위해 최적화)
   async getNewsFromMongoDB(): Promise<any[]> {
     try {
-      // MongoDB 연결 대기
-      await this.waitForMongoConnection();
+      // MongoDB 연결 대기 시간 단축 (3초)
+      const isConnected = await this.waitForMongoConnection(3);
+
+      if (!isConnected) {
+        this.logger.warn('⚠️ MongoDB 연결 실패. 바로 네이버 API 호출합니다.');
+        return await this.fetchNaverNews();
+      }
 
       const db = this.mongoDbService.getDatabase();
       if (!db) {
@@ -117,8 +129,9 @@ export class NewsService implements OnModuleInit {
         return await this.fetchNaverNews();
       }
 
+      // MongoDB 조회 타임아웃 설정
       const collection = db.collection('news');
-      const news = await collection.find({}).toArray();
+      const news = await collection.find({}).maxTimeMS(3000).toArray(); // 3초 타임아웃
 
       this.logger.log(`📖 MongoDB에서 뉴스 ${news.length}건 조회`);
 
@@ -138,11 +151,13 @@ export class NewsService implements OnModuleInit {
     }
   }
 
-  // MongoDB 연결 대기
-  private async waitForMongoConnection() {
-    this.logger.log('⏳ MongoDB 연결 확인 중...');
+  // MongoDB 연결 대기 (시간 단축)
+  private async waitForMongoConnection(
+    maxSeconds: number = 3,
+  ): Promise<boolean> {
+    this.logger.log(`⏳ MongoDB 연결 확인 중... (최대 ${maxSeconds}초)`);
     let attempts = 0;
-    const maxAttempts = 10; // 최대 10초 대기
+    const maxAttempts = maxSeconds;
 
     while (!this.mongoDbService.isMongoConnected() && attempts < maxAttempts) {
       await new Promise((resolve) => setTimeout(resolve, 1000)); // 1초 대기
@@ -151,8 +166,10 @@ export class NewsService implements OnModuleInit {
 
     if (this.mongoDbService.isMongoConnected()) {
       this.logger.log('✅ MongoDB 연결 확인 완료');
+      return true;
     } else {
-      this.logger.warn('⚠️ MongoDB 연결 대기 시간 초과');
+      this.logger.warn(`⚠️ MongoDB 연결 대기 시간 초과 (${maxSeconds}초)`);
+      return false;
     }
   }
 
