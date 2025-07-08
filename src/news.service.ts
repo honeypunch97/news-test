@@ -1,29 +1,22 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { ConfigService } from '@nestjs/config';
-import { MongoDbService } from './database/mongodb.service';
 
 @Injectable()
-export class NewsService implements OnModuleInit {
+export class NewsService {
   private readonly logger = new Logger(NewsService.name);
   private newsData: any[] = [];
+  private lastUpdated: Date | null = null;
+  private readonly CACHE_DURATION_MS = 60 * 60 * 1000; // 1시간
 
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
-    private readonly mongoDbService: MongoDbService,
   ) {}
 
-  // 서버 시작시 뉴스 가져오기 (서버리스에서는 생략)
-  async onModuleInit() {
-    this.logger.log('🚀 뉴스 서비스 초기화 시작');
-    // 서버리스 환경에서는 초기 뉴스 수집 생략
-    // await this.fetchNaverNews();
-  }
-
-  // 네이버 뉴스 API 호출 (병렬 처리로 최적화)
-  async fetchNaverNews() {
+  // 네이버 뉴스 API 호출 (병렬 처리)
+  async fetchNaverNews(): Promise<any[]> {
     this.logger.log('🕐 네이버 뉴스 API 호출 시작');
     const category = ['한국', '속보', '특보', '사회', 'IT'];
 
@@ -65,12 +58,12 @@ export class NewsService implements OnModuleInit {
       const responses = await Promise.all(promises);
       const newsData = responses.flatMap((response) => response.data.items);
 
+      // 메모리에 저장 및 시간 업데이트
       this.newsData = newsData;
-      this.logger.log(`📊 네이버 뉴스 ${this.newsData.length}건 수집 완료`);
+      this.lastUpdated = new Date();
 
-      // MongoDB에 뉴스 데이터 저장 (비동기로 처리)
-      this.saveNewsToMongoDB(newsData).catch((error) =>
-        this.logger.error('❌ 백그라운드 MongoDB 저장 실패:', error.message),
+      this.logger.log(
+        `📊 네이버 뉴스 ${newsData.length}건 수집 완료 (${this.lastUpdated.toLocaleString()})`,
       );
 
       return newsData;
@@ -80,97 +73,37 @@ export class NewsService implements OnModuleInit {
     }
   }
 
-  // MongoDB에 뉴스 데이터 저장 (최신 50개만 유지)
-  private async saveNewsToMongoDB(newsData: any[]) {
-    try {
-      const db = this.mongoDbService.getDatabase();
-      if (!db) {
-        this.logger.warn('⚠️ MongoDB 연결이 없어 뉴스 저장을 건너뜁니다.');
-        return;
-      }
+  // 뉴스 가져오기 (캐시 확인 후 필요시 갱신)
+  async getNews(): Promise<any[]> {
+    const now = new Date();
 
-      const collection = db.collection('news');
+    // 데이터가 없거나 1시간 이상 지났는지 확인
+    const needsUpdate =
+      !this.lastUpdated ||
+      this.newsData.length === 0 ||
+      now.getTime() - this.lastUpdated.getTime() >= this.CACHE_DURATION_MS;
 
-      // 새 뉴스 데이터 저장
-      if (newsData.length > 0) {
-        const newsWithTimestamp = newsData.map((news) => ({
-          ...news,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        }));
-
-        // 기존 데이터 삭제 후 새 데이터 추가
-        await collection.deleteMany({});
-        await collection.insertMany(newsWithTimestamp);
-
-        this.logger.log(`💾 MongoDB에 뉴스 ${newsData.length}건 저장 완료`);
-      }
-    } catch (error) {
-      this.logger.error('❌ MongoDB 뉴스 저장 실패:', error.message);
-    }
-  }
-
-  // MongoDB에서 뉴스 가져오기 (빠른 응답을 위해 최적화)
-  async getNewsFromMongoDB(): Promise<any[]> {
-    try {
-      // MongoDB 연결 대기 시간 단축 (3초)
-      const isConnected = await this.waitForMongoConnection(3);
-
-      if (!isConnected) {
-        this.logger.warn('⚠️ MongoDB 연결 실패. 바로 네이버 API 호출합니다.');
-        return await this.fetchNaverNews();
-      }
-
-      const db = this.mongoDbService.getDatabase();
-      if (!db) {
-        this.logger.warn(
-          '⚠️ MongoDB 연결이 없습니다. 새로운 뉴스를 가져옵니다.',
+    if (needsUpdate) {
+      if (!this.lastUpdated) {
+        this.logger.log('🆕 첫 번째 뉴스 데이터 수집');
+      } else {
+        const timeDiff = Math.round(
+          (now.getTime() - this.lastUpdated.getTime()) / (1000 * 60),
         );
-        return await this.fetchNaverNews();
+        this.logger.log(`🔄 캐시 만료 (${timeDiff}분 경과) - 뉴스 데이터 갱신`);
       }
 
-      // MongoDB 조회 타임아웃 설정
-      const collection = db.collection('news');
-      const news = await collection.find({}).maxTimeMS(3000).toArray(); // 3초 타임아웃
-
-      this.logger.log(`📖 MongoDB에서 뉴스 ${news.length}건 조회`);
-
-      // MongoDB에 데이터가 없으면 새로 가져오기
-      if (news.length === 0) {
-        this.logger.log(
-          '📭 MongoDB에 뉴스가 없습니다. 새로운 뉴스를 가져옵니다.',
-        );
-        return await this.fetchNaverNews();
-      }
-
-      return news;
-    } catch (error) {
-      this.logger.error('❌ MongoDB 뉴스 조회 실패:', error.message);
-      // 실패시 새로운 뉴스 가져오기
-      return await this.fetchNaverNews();
-    }
-  }
-
-  // MongoDB 연결 대기 (시간 단축)
-  private async waitForMongoConnection(
-    maxSeconds: number = 3,
-  ): Promise<boolean> {
-    this.logger.log(`⏳ MongoDB 연결 확인 중... (최대 ${maxSeconds}초)`);
-    let attempts = 0;
-    const maxAttempts = maxSeconds;
-
-    while (!this.mongoDbService.isMongoConnected() && attempts < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // 1초 대기
-      attempts++;
-    }
-
-    if (this.mongoDbService.isMongoConnected()) {
-      this.logger.log('✅ MongoDB 연결 확인 완료');
-      return true;
+      await this.fetchNaverNews();
     } else {
-      this.logger.warn(`⚠️ MongoDB 연결 대기 시간 초과 (${maxSeconds}초)`);
-      return false;
+      const timeDiff = Math.round(
+        (now.getTime() - this.lastUpdated.getTime()) / (1000 * 60),
+      );
+      this.logger.log(
+        `⚡ 캐시된 뉴스 반환 (${timeDiff}분 전 수집, ${this.newsData.length}건)`,
+      );
     }
+
+    return this.newsData;
   }
 
   // 수동으로 뉴스 갱신
@@ -179,7 +112,31 @@ export class NewsService implements OnModuleInit {
     return await this.fetchNaverNews();
   }
 
-  getNews(): any[] {
-    return this.newsData;
+  // 캐시 상태 확인
+  getCacheStatus() {
+    if (!this.lastUpdated) {
+      return {
+        hasData: false,
+        lastUpdated: null,
+        newsCount: 0,
+        cacheAge: 0,
+        needsUpdate: true,
+      };
+    }
+
+    const now = new Date();
+    const lastUpdatedTime = this.lastUpdated!;
+    const cacheAge = Math.round(
+      (now.getTime() - lastUpdatedTime.getTime()) / (1000 * 60),
+    );
+    const needsUpdate = cacheAge >= 60; // 60분
+
+    return {
+      hasData: this.newsData.length > 0,
+      lastUpdated: lastUpdatedTime.toLocaleString(),
+      newsCount: this.newsData.length,
+      cacheAge: `${cacheAge}분`,
+      needsUpdate,
+    };
   }
 }

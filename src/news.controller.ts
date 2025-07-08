@@ -7,8 +7,8 @@ export class NewsController {
 
   @Get()
   async getNews(): Promise<any[]> {
-    // MongoDB에서 뉴스 가져오기 (없으면 API 호출)
-    return await this.newsService.getNewsFromMongoDB();
+    // 메모리에서 뉴스 가져오기 (캐시 확인 후 필요시 갱신)
+    return await this.newsService.getNews();
   }
 
   // 수동으로 뉴스 갱신
@@ -17,13 +17,13 @@ export class NewsController {
     return await this.newsService.refreshNews();
   }
 
-  // 서비스 상태 확인
+  // 캐시 상태 확인
   @Get('status')
   async getStatus() {
     return {
-      message: '뉴스 서비스 상태',
-      timestamp: new Date(),
-      mongodb: 'MongoDB 연결 상태는 로그에서 확인하세요',
+      service: '메모리 기반 뉴스 서비스',
+      cache: this.newsService.getCacheStatus(),
+      timestamp: new Date().toLocaleString(),
     };
   }
 }

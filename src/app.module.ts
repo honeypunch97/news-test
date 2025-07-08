@@ -5,7 +5,6 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { NewsController } from './news.controller';
 import { NewsService } from './news.service';
-import { MongoDbService } from './database/mongodb.service';
 
 @Module({
   imports: [
@@ -15,6 +14,6 @@ import { MongoDbService } from './database/mongodb.service';
     HttpModule,
   ],
   controllers: [AppController, NewsController],
-  providers: [AppService, NewsService, MongoDbService],
+  providers: [AppService, NewsService],
 })
 export class AppModule {}
