@@ -3,6 +3,12 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  await app.listen(process.env.PORT ?? 3000);
+  await app.init();
+  return app.getHttpAdapter().getInstance();
 }
-bootstrap();
+
+// 서버리스 함수로 export
+export default async (req: any, res: any) => {
+  const server = await bootstrap();
+  return server(req, res);
+};

@@ -14,20 +14,5 @@
       "src": "/(.*)",
       "dest": "dist/main.js"
     }
-  ],
-  "functions": {
-    "dist/main.js": {
-      "maxDuration": 30
-    }
-  },
-  "env": {
-    "MONGODB_URI": "@mongodb_uri",
-    "MONGODB_DATABASE": "@mongodb_database",
-    "NAVER_CLIENT_ID": "@naver_client_id",
-    "NAVER_CLIENT_SECRET": "@naver_client_secret"
-  },
-  "scripts": {
-    "build": "nest build",
-    "vercel-build": "nest build"
-  }
+  ]
 }
