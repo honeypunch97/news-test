@@ -2,18 +2,36 @@ import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { ConfigService } from '@nestjs/config';
+import { createClient } from 'redis';
 
 @Injectable()
 export class NewsService {
   private readonly logger = new Logger(NewsService.name);
-  private newsData: any[] = [];
-  private lastUpdated: Date | null = null;
-  private readonly CACHE_DURATION_MS = 60 * 60 * 1000; // 1시간
+  private readonly CACHE_DURATION_SECONDS = 30 * 60; // 30분
+  private readonly CACHE_KEY = 'news-data';
+  private redis: any;
 
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {}
+
+  // Redis 클라이언트 연결 (필요시 생성)
+  private async getRedisClient() {
+    if (!this.redis) {
+      try {
+        this.redis = createClient({
+          url: this.configService.get('REDIS_URL') || undefined,
+        });
+        await this.redis.connect();
+        this.logger.log('✅ Redis 클라이언트 연결 성공');
+      } catch (error) {
+        this.logger.error('❌ Redis 클라이언트 연결 실패:', error.message);
+        throw error;
+      }
+    }
+    return this.redis;
+  }
 
   // 네이버 뉴스 API 호출 (병렬 처리)
   async fetchNaverNews(): Promise<any[]> {
@@ -58,13 +76,26 @@ export class NewsService {
       const responses = await Promise.all(promises);
       const newsData = responses.flatMap((response) => response.data.items);
 
-      // 메모리에 저장 및 시간 업데이트
-      this.newsData = newsData;
-      this.lastUpdated = new Date();
+      const cacheData = {
+        news: newsData,
+        lastUpdated: new Date().toISOString(),
+        count: newsData.length,
+      };
 
-      this.logger.log(
-        `📊 네이버 뉴스 ${newsData.length}건 수집 완료 (${this.lastUpdated.toLocaleString()})`,
-      );
+      // Redis에 캐시 저장 (30분)
+      try {
+        const redis = await this.getRedisClient();
+        await redis.setEx(
+          this.CACHE_KEY,
+          this.CACHE_DURATION_SECONDS,
+          JSON.stringify(cacheData),
+        );
+        this.logger.log(
+          `📊 네이버 뉴스 ${newsData.length}건 수집 완료 → Redis 캐시 저장`,
+        );
+      } catch (redisError) {
+        this.logger.error('❌ Redis 캐시 저장 실패:', redisError.message);
+      }
 
       return newsData;
     } catch (error) {
@@ -73,70 +104,83 @@ export class NewsService {
     }
   }
 
-  // 뉴스 가져오기 (캐시 확인 후 필요시 갱신)
+  // 뉴스 가져오기 (Redis 캐시 확인 후 필요시 갱신)
   async getNews(): Promise<any[]> {
-    const now = new Date();
+    try {
+      // Redis에서 캐시 확인
+      const redis = await this.getRedisClient();
+      const cachedDataString = await redis.get(this.CACHE_KEY);
 
-    // 데이터가 없거나 1시간 이상 지났는지 확인
-    const needsUpdate =
-      !this.lastUpdated ||
-      this.newsData.length === 0 ||
-      now.getTime() - this.lastUpdated.getTime() >= this.CACHE_DURATION_MS;
+      if (cachedDataString) {
+        const cachedData = JSON.parse(cachedDataString);
 
-    if (needsUpdate) {
-      if (!this.lastUpdated) {
-        this.logger.log('🆕 첫 번째 뉴스 데이터 수집');
-      } else {
-        const timeDiff = Math.round(
-          (now.getTime() - this.lastUpdated.getTime()) / (1000 * 60),
-        );
-        this.logger.log(`🔄 캐시 만료 (${timeDiff}분 경과) - 뉴스 데이터 갱신`);
+        if (cachedData && cachedData.news) {
+          const lastUpdated = new Date(cachedData.lastUpdated);
+          const now = new Date();
+          const timeDiff = Math.round(
+            (now.getTime() - lastUpdated.getTime()) / (1000 * 60),
+          );
+
+          this.logger.log(
+            `⚡ Redis 캐시에서 뉴스 반환 (${timeDiff}분 전 수집, ${cachedData.count}건)`,
+          );
+          return cachedData.news;
+        }
       }
 
-      await this.fetchNaverNews();
-    } else {
-      const timeDiff = Math.round(
-        (now.getTime() - this.lastUpdated.getTime()) / (1000 * 60),
-      );
-      this.logger.log(
-        `⚡ 캐시된 뉴스 반환 (${timeDiff}분 전 수집, ${this.newsData.length}건)`,
-      );
+      this.logger.log('🆕 Redis 캐시 없음 - 새로운 뉴스 데이터 수집');
+      return await this.fetchNaverNews();
+    } catch (error) {
+      this.logger.error('❌ Redis 캐시 확인 실패:', error.message);
+      this.logger.log('🔄 캐시 실패로 인한 API 직접 호출');
+      return await this.fetchNaverNews();
     }
-
-    return this.newsData;
   }
 
   // 수동으로 뉴스 갱신
   async refreshNews(): Promise<any[]> {
-    this.logger.log('🔄 뉴스 수동 갱신 시작');
+    this.logger.log('🔄 뉴스 수동 갱신 시작 - 캐시 무시하고 새로 가져오기');
     return await this.fetchNaverNews();
   }
 
   // 캐시 상태 확인
-  getCacheStatus() {
-    if (!this.lastUpdated) {
+  async getCacheStatus() {
+    try {
+      const redis = await this.getRedisClient();
+      const cachedDataString = await redis.get(this.CACHE_KEY);
+
+      if (!cachedDataString) {
+        return {
+          hasCache: false,
+          lastUpdated: null,
+          newsCount: 0,
+          cacheAge: null,
+          needsUpdate: true,
+        };
+      }
+
+      const cachedData = JSON.parse(cachedDataString);
+      const lastUpdated = new Date(cachedData.lastUpdated);
+      const now = new Date();
+      const cacheAge = Math.round(
+        (now.getTime() - lastUpdated.getTime()) / (1000 * 60),
+      );
+      const needsUpdate = cacheAge >= 30; // 30분
+
       return {
-        hasData: false,
-        lastUpdated: null,
-        newsCount: 0,
-        cacheAge: 0,
+        hasCache: true,
+        lastUpdated: lastUpdated.toLocaleString(),
+        newsCount: cachedData.count,
+        cacheAge: `${cacheAge}분`,
+        needsUpdate,
+      };
+    } catch (error) {
+      this.logger.error('❌ Redis 캐시 상태 확인 실패:', error.message);
+      return {
+        hasCache: false,
+        error: error.message,
         needsUpdate: true,
       };
     }
-
-    const now = new Date();
-    const lastUpdatedTime = this.lastUpdated!;
-    const cacheAge = Math.round(
-      (now.getTime() - lastUpdatedTime.getTime()) / (1000 * 60),
-    );
-    const needsUpdate = cacheAge >= 60; // 60분
-
-    return {
-      hasData: this.newsData.length > 0,
-      lastUpdated: lastUpdatedTime.toLocaleString(),
-      newsCount: this.newsData.length,
-      cacheAge: `${cacheAge}분`,
-      needsUpdate,
-    };
   }
 }
