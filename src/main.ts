@@ -10,6 +10,7 @@ async function bootstrap() {
       'http://localhost:3030',
       'http://localhost:5173',
       'https://dsign.zigdding.com',
+      'https://dev-dsign.zigdding.com',
     ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
